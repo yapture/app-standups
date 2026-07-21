@@ -97,6 +97,10 @@ const EXAMPLE_ITEMS: { text: string; status: StandupItem['status'] }[] = [
   { text: 'API rate limit hitting staging #blocker #+alex #@infra #!urgent', status: 'pending' },
 ];
 
+/* ── Constants ─────────────────────────────────────────────────────── */
+
+const ACCENT = 'var(--yap-feature-notes)';
+
 /* ── Component ─────────────────────────────────────────────────────── */
 
 export function App() {
@@ -217,8 +221,8 @@ export function App() {
           onClick={() => cycleStatus(item.id)}
           style={{
             ...styles.statusDot,
-            background: item.status === 'done' ? '#43D6AD' : 'rgba(166,176,190,.25)',
-            boxShadow: item.status === 'done' ? '0 0 8px rgba(67,214,173,.4)' : 'none',
+            background: item.status === 'done' ? 'var(--yap-success)' : 'var(--yap-border)',
+            boxShadow: item.status === 'done' ? '0 0 8px var(--yap-success-bg)' : 'none',
           }}
           title={item.status === 'done' ? 'Mark pending' : 'Mark done'}
         />
@@ -325,18 +329,18 @@ export function App() {
               <div key={name} style={styles.teamRow}>
                 <h3 style={styles.teamName}>{name}</h3>
                 <div className="standups-columns" style={styles.columnsGrid}>
-                  {renderColumn('Yesterday', group.yesterday, '#43D6AD')}
+                  {renderColumn('Yesterday', group.yesterday, 'var(--yap-success)')}
                   {renderColumn('Today', group.today, ACCENT)}
-                  {renderColumn('Blockers', group.blockers, '#FF6B6B')}
+                  {renderColumn('Blockers', group.blockers, 'var(--yap-danger)')}
                 </div>
               </div>
             ))}
           </div>
         ) : (
           <div className="standups-columns" style={styles.columnsGrid}>
-            {renderColumn('Yesterday', columns.yesterday, '#43D6AD')}
+            {renderColumn('Yesterday', columns.yesterday, 'var(--yap-success)')}
             {renderColumn('Today', columns.today, ACCENT)}
-            {renderColumn('Blockers', columns.blockers, '#FF6B6B')}
+            {renderColumn('Blockers', columns.blockers, 'var(--yap-danger)')}
           </div>
         )}
       </main>
@@ -362,10 +366,6 @@ export function App() {
   );
 }
 
-/* ── Constants ─────────────────────────────────────────────────────── */
-
-const ACCENT = '#8C63FF';
-
 /* ── Responsive CSS ────────────────────────────────────────────────── */
 
 const responsiveCSS = `
@@ -386,42 +386,42 @@ const responsiveCSS = `
 /* ── Styles ─────────────────────────────────────────────────────────── */
 
 const S: Record<string, React.CSSProperties> = {
-  root: { minHeight: '100vh', background: '#080b10', color: '#f7f4ec', fontFamily: 'Inter, system-ui, -apple-system, sans-serif', display: 'flex', flexDirection: 'column' },
-  header: { borderBottom: '1px solid rgba(166,176,190,.18)', padding: '16px 0' },
+  root: { minHeight: '100vh', background: '#080b10', color: 'var(--yap-fg)', fontFamily: 'var(--yap-font-sans)', display: 'flex', flexDirection: 'column' },
+  header: { borderBottom: '1px solid var(--yap-border)', padding: '16px 0' },
   headerInner: { maxWidth: 1120, margin: '0 auto', padding: '0 24px', display: 'flex', justifyContent: 'space-between', alignItems: 'center' },
   logo: { fontSize: 20, fontWeight: 700, margin: 0, display: 'flex', alignItems: 'baseline', gap: 8 },
-  logoSub: { fontSize: 13, fontWeight: 400, color: '#a6b0be' },
+  logoSub: { fontSize: 13, fontWeight: 400, color: 'var(--yap-fg-muted)' },
   marketLink: { fontSize: 14, color: ACCENT, textDecoration: 'none', fontWeight: 500 },
   main: { flex: 1, maxWidth: 1120, margin: '0 auto', padding: '32px 24px', width: '100%', boxSizing: 'border-box' as const },
   form: { display: 'flex', gap: 12, marginBottom: 12 },
-  input: { flex: 1, padding: '12px 16px', borderRadius: 10, border: '1px solid rgba(166,176,190,.18)', background: '#0f141c', color: '#f7f4ec', fontSize: 15, fontFamily: '"JetBrains Mono", monospace', outline: 'none' },
+  input: { flex: 1, padding: '12px 16px', borderRadius: 10, border: '1px solid var(--yap-border)', background: 'var(--yap-input-bg)', color: 'var(--yap-fg)', fontSize: 15, fontFamily: 'var(--yap-font-mono)', outline: 'none' },
   addBtn: { padding: '12px 24px', borderRadius: 10, border: 'none', background: ACCENT, color: '#fff', fontSize: 15, fontWeight: 600, cursor: 'pointer' },
-  preview: { display: 'flex', alignItems: 'center', gap: 8, padding: '8px 16px', marginBottom: 16, borderRadius: 8, background: 'rgba(140,99,255,.06)', border: '1px solid rgba(140,99,255,.15)', fontSize: 14, flexWrap: 'wrap' as const },
-  previewTitle: { color: '#f7f4ec', fontWeight: 500 },
+  preview: { display: 'flex', alignItems: 'center', gap: 8, padding: '8px 16px', marginBottom: 16, borderRadius: 8, background: 'var(--yap-accent-muted)', border: '1px solid var(--yap-accent-muted)', fontSize: 14, flexWrap: 'wrap' as const },
+  previewTitle: { color: 'var(--yap-fg)', fontWeight: 500 },
   actions: { display: 'flex', flexWrap: 'wrap' as const, gap: 8, marginBottom: 28, alignItems: 'center' },
-  actionBtn: { padding: '8px 16px', borderRadius: 8, border: '1px solid rgba(166,176,190,.14)', background: 'rgba(255,255,255,.04)', color: '#a6b0be', fontSize: 13, fontWeight: 500, cursor: 'pointer', fontFamily: 'inherit' },
-  actionBtnActive: { background: 'rgba(140,99,255,.12)', color: '#B49AFF', borderColor: 'rgba(140,99,255,.3)' },
-  countLabel: { marginLeft: 'auto', fontSize: 13, color: '#738091' },
+  actionBtn: { padding: '8px 16px', borderRadius: 8, border: '1px solid var(--yap-border-subtle)', background: 'var(--yap-border-subtle)', color: 'var(--yap-fg-muted)', fontSize: 13, fontWeight: 500, cursor: 'pointer', fontFamily: 'inherit' },
+  actionBtnActive: { background: 'var(--yap-accent-muted)', color: 'var(--yap-accent-hover)', borderColor: 'var(--yap-accent-muted)' },
+  countLabel: { marginLeft: 'auto', fontSize: 13, color: 'var(--yap-fg-faint)' },
   columnsGrid: {},
   column: { minWidth: 0 },
-  colHeader: { fontSize: 15, fontWeight: 600, fontFamily: '"JetBrains Mono", monospace', textTransform: 'uppercase' as const, letterSpacing: '.08em', color: '#a6b0be', borderLeft: '3px solid', paddingLeft: 12, marginBottom: 16 },
+  colHeader: { fontSize: 15, fontWeight: 600, fontFamily: 'var(--yap-font-mono)', textTransform: 'uppercase' as const, letterSpacing: '.08em', color: 'var(--yap-fg-muted)', borderLeft: '3px solid', paddingLeft: 12, marginBottom: 16 },
   colBody: { display: 'flex', flexDirection: 'column' as const, gap: 10 },
-  colEmpty: { fontSize: 13, color: '#738091', padding: '20px 0', textAlign: 'center' as const },
-  card: { padding: 14, borderRadius: 12, border: '1px solid rgba(166,176,190,.18)', background: '#151c27', cursor: 'pointer', transition: 'transform .15s, box-shadow .15s' },
+  colEmpty: { fontSize: 13, color: 'var(--yap-fg-faint)', padding: '20px 0', textAlign: 'center' as const },
+  card: { padding: 14, borderRadius: 12, border: '1px solid var(--yap-border)', background: 'var(--yap-card-bg)', cursor: 'pointer', transition: 'transform .15s, box-shadow .15s' },
   cardRow: { display: 'flex', alignItems: 'center', gap: 10, marginBottom: 6 },
   statusDot: { width: 14, height: 14, borderRadius: '50%', border: 'none', cursor: 'pointer', flexShrink: 0, transition: 'background .2s, box-shadow .2s' },
   cardTitle: { flex: 1, fontSize: 15, fontWeight: 500, lineHeight: 1.35 },
-  removeBtn: { border: 'none', background: 'none', color: '#738091', fontSize: 18, cursor: 'pointer', padding: '0 4px', flexShrink: 0 },
+  removeBtn: { border: 'none', background: 'none', color: 'var(--yap-fg-faint)', fontSize: 18, cursor: 'pointer', padding: '0 4px', flexShrink: 0 },
   badges: { display: 'flex', flexWrap: 'wrap' as const, gap: 5, paddingLeft: 24 },
-  badge: { padding: '2px 7px', borderRadius: 5, fontSize: 12, fontWeight: 600, fontFamily: '"JetBrains Mono", monospace' },
-  badgeAssignee: { background: 'rgba(77,107,255,.12)', color: '#7B93FF' },
-  badgePriority: { background: 'rgba(234,88,12,.12)', color: '#fb923c' },
-  badgeWorkspace: { background: 'rgba(5,150,105,.12)', color: '#34d399' },
-  badgeBlocker: { background: 'rgba(255,107,107,.12)', color: '#FF6B6B' },
-  badgeDue: { background: 'rgba(140,99,255,.1)', color: '#B49AFF' },
-  teamRow: { marginBottom: 32, paddingBottom: 24, borderBottom: '1px solid rgba(166,176,190,.08)' },
-  teamName: { fontSize: 16, fontWeight: 600, color: '#f7f4ec', marginBottom: 14, textTransform: 'capitalize' as const },
-  footer: { borderTop: '1px solid rgba(166,176,190,.18)', padding: '20px 24px', display: 'flex', justifyContent: 'center', gap: 12, fontSize: 13, color: '#738091' },
+  badge: { padding: '2px 7px', borderRadius: 5, fontSize: 12, fontWeight: 600, fontFamily: 'var(--yap-font-mono)' },
+  badgeAssignee: { background: 'var(--yap-accent-muted)', color: 'var(--yap-info-fg)' },
+  badgePriority: { background: 'var(--yap-warning-bg)', color: 'var(--yap-priority-high)' },
+  badgeWorkspace: { background: 'var(--yap-success-bg)', color: 'var(--yap-success-fg)' },
+  badgeBlocker: { background: 'var(--yap-danger-bg)', color: 'var(--yap-danger)' },
+  badgeDue: { background: 'var(--yap-accent-muted)', color: 'var(--yap-accent-hover)' },
+  teamRow: { marginBottom: 32, paddingBottom: 24, borderBottom: '1px solid var(--yap-border-subtle)' },
+  teamName: { fontSize: 16, fontWeight: 600, color: 'var(--yap-fg)', marginBottom: 14, textTransform: 'capitalize' as const },
+  footer: { borderTop: '1px solid var(--yap-border)', padding: '20px 24px', display: 'flex', justifyContent: 'center', gap: 12, fontSize: 13, color: 'var(--yap-fg-faint)' },
   footerLink: { color: ACCENT, textDecoration: 'none' },
 };
 const styles = S;

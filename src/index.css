@@ -1,0 +1,7 @@
+@import "tailwindcss";
+@import "@yapture/tokens/css";
+@import "@yapture/tokens/css/light";
+@import "@yapture/tokens/theme.css";
+
+/* App-level overrides: the market mini-apps use a deeper dark shell.
+   #080b10 is the app-shell background, kept as a raw value intentionally. */

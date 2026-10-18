@@ -1,0 +1,14 @@
+# Cloudflare Pages response headers (served from dist/_headers).
+# No Strict-Transport-Security: none is sent today by the yapture.com zone or by this
+# app (checked 2026-10-18). Turning HSTS on for *.apps.yapture.com is a zone-level
+# operator decision, not something one Pages project should set alone.
+
+/*
+  X-Content-Type-Options: nosniff
+  Referrer-Policy: strict-origin-when-cross-origin
+  X-Frame-Options: DENY
+  Content-Security-Policy: frame-ancestors 'none'; base-uri 'self'; object-src 'none'
+
+/version.json
+  Cache-Control: no-store
+  Content-Type: application/json

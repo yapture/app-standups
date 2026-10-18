@@ -1,0 +1,47 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [master]
+
+permissions:
+  contents: read
+  packages: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version-file: ".bun-version"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      # Socket Firewall wraps every install (org supply-chain rule). The binary is
+      # downloaded at a pinned version and SHA256-verified by the vendored script
+      # (same script and pin as Market).
+      - name: Bootstrap pinned Socket Firewall
+        run: node scripts/setup-sfw.mjs
+      # @yapture/* live on GitHub Packages, which needs auth. Without this the
+      # install fails with 401s that look like missing packages.
+      - name: Configure GitHub Packages for Yapture workspace packages
+        run: |
+          cat > .npmrc <<'EOF'
+          @yapture:registry=https://npm.pkg.github.com
+          //npm.pkg.github.com/:_authToken=${NODE_AUTH_TOKEN}
+          always-auth=true
+          EOF
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.GH_PACKAGES_TOKEN || github.token }}
+      - run: sfw bun install --frozen-lockfile --ignore-scripts
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.GH_PACKAGES_TOKEN || github.token }}
+      - run: bun run typecheck
+      - run: bun run grep-gate
+      - run: bun run build
+      - run: bun run test

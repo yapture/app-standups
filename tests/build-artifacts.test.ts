@@ -118,3 +118,41 @@ describe('index.html and reproducibility', () => {
     for (const f of assets(outA)) expect(read(outA, 'assets/' + f)).toBe(read(outB, 'assets/' + f));
   });
 });
+
+describe('page metadata, favicon and robots.txt', () => {
+  const html = () => read(outA, 'index.html');
+  const TITLE = "Yapture Standups";
+  const DESC = "Daily standup board built on Yapture Script and list primitives.";
+  const URL_ = "https://standups.apps.yapture.com/";
+
+  test('index.html keeps the title and carries description and canonical for the right host', () => {
+    const h = html();
+    expect(h).toContain('<title>' + TITLE + '</title>');
+    expect(h).toContain('<meta name="description" content="' + DESC + '" />');
+    expect(h).toContain('<link rel="canonical" href="' + URL_ + '" />');
+    expect(URL_).toBe('https://' + SLUG + '.apps.yapture.com/');
+  });
+
+  test('index.html carries the Open Graph and Twitter tags (no og:image: no suitable asset)', () => {
+    const h = html();
+    expect(h).toContain('<meta property="og:type" content="website" />');
+    expect(h).toContain('<meta property="og:site_name" content="Yapture" />');
+    expect(h).toContain('<meta property="og:title" content="' + TITLE + '" />');
+    expect(h).toContain('<meta property="og:description" content="' + DESC + '" />');
+    expect(h).toContain('<meta property="og:url" content="' + URL_ + '" />');
+    expect(h).toContain('<meta name="twitter:card" content="summary" />');
+    expect(h).not.toContain('og:image');
+  });
+
+  test('index.html links the SVG favicon and dist serves it', () => {
+    expect(html()).toContain('<link rel="icon" type="image/svg+xml" href="/favicon.svg" />');
+    expect(existsSync(join(outA, 'favicon.svg'))).toBe(true);
+    expect(read(outA, 'favicon.svg')).toContain('<svg');
+    // a later swap to an unsafe file must fail: no script, foreignObject or external references
+    expect(/<script|foreignObject|xlink:href|\shref=|\son[a-z]+=/i.test(readFileSync(join(outA, 'favicon.svg'), 'utf8'))).toBe(false);
+  });
+
+  test('dist/robots.txt allows everything and names no sitemap', () => {
+    expect(read(outA, 'robots.txt')).toBe('User-agent: *\nAllow: /\n');
+  });
+});

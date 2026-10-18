@@ -1,0 +1,11 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-label="Yapture">
+  <defs>
+    <linearGradient id="market" x1="8" y1="6" x2="57" y2="58" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#b8d0ff"/>
+      <stop offset="1" stop-color="#6389ee"/>
+    </linearGradient>
+  </defs>
+  <rect width="64" height="64" rx="18" fill="#09142d"/>
+  <path d="M15 18.5h34v27H15z" fill="none" stroke="url(#market)" stroke-width="4" stroke-linejoin="round"/>
+  <path d="m15 24 17 12 17-12M23 18.5v-6h18v6" fill="none" stroke="url(#market)" stroke-width="4" stroke-linecap="round" stroke-linejoin="round"/>
+</svg>

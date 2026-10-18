@@ -1,4 +1,4 @@
-import { useCallback, useMemo, useState, type FormEvent } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent } from 'react';
 
 /* ── Types ─────────────────────────────────────────────────────────── */
 
@@ -108,11 +108,30 @@ export function App() {
   const [input, setInput] = useState('');
   const [teamView, setTeamView] = useState(false);
   const [copiedSummary, setCopiedSummary] = useState(false);
+  const [status, setStatus] = useState('');
+  const flip = useRef(false);
+  const pendingFocus = useRef<{ selector: string | null; fallbacks: string[] } | null>(null);
 
   const persist = useCallback((next: StandupItem[]) => {
     setItems(next);
     saveItems(next);
   }, []);
+
+  /* Polite live-region message; alternate a trailing nbsp so repeats are re-announced. */
+  const announce = useCallback((msg: string) => {
+    flip.current = !flip.current;
+    setStatus(flip.current ? msg : msg + '\u00a0');
+  }, []);
+
+  /* After a remove/status change, restore focus to the next control, else the column heading, else the composer. */
+  useEffect(() => {
+    const p = pendingFocus.current;
+    if (!p) return;
+    pendingFocus.current = null;
+    const el = (p.selector && document.querySelector<HTMLElement>(p.selector))
+      || p.fallbacks.map((id) => document.getElementById(id)).find(Boolean);
+    el?.focus();
+  }, [items]);
 
   const addItem = useCallback(
     (text: string, forceStatus?: StandupItem['status']) => {
@@ -126,26 +145,34 @@ export function App() {
       };
       persist([item, ...items]);
       setInput('');
+      announce(`Added ${item.title}`);
     },
-    [items, persist],
+    [items, persist, announce],
   );
 
   const cycleStatus = useCallback(
     (id: string) => {
-      const next = items.map((it) => {
-        if (it.id !== id) return it;
-        return { ...it, status: (it.status === 'pending' ? 'done' : 'pending') as StandupItem['status'] };
-      });
-      persist(next);
+      const cur = items.find((it) => it.id === id);
+      if (!cur) return;
+      const nextStatus: StandupItem['status'] = cur.status === 'pending' ? 'done' : 'pending';
+      /* The card may move to another column and remount, so re-find its toggle afterwards. */
+      pendingFocus.current = { selector: `[data-status-id="${id}"]`, fallbacks: ['standup-input'] };
+      persist(items.map((it) => (it.id !== id ? it : { ...it, status: nextStatus })));
+      announce(nextStatus === 'done' ? `Marked ${cur.title} done` : `Marked ${cur.title} pending`);
     },
-    [items, persist],
+    [items, persist, announce],
   );
 
   const removeItem = useCallback(
-    (id: string) => {
+    (id: string, siblings: StandupItem[], headingId: string) => {
+      const gone = items.find((it) => it.id === id);
+      const i = siblings.findIndex((it) => it.id === id);
+      const next = siblings[i + 1] ?? siblings[i - 1];
+      pendingFocus.current = { selector: next ? `[data-remove-id="${next.id}"]` : null, fallbacks: [headingId, 'standup-input'] };
       persist(items.filter((it) => it.id !== id));
+      if (gone) announce(`Removed ${gone.title}`);
     },
-    [items, persist],
+    [items, persist, announce],
   );
 
   const handleSubmit = (e: FormEvent) => {
@@ -164,6 +191,7 @@ export function App() {
       } as StandupItem;
     });
     persist([...newItems, ...items]);
+    announce(`Added ${newItems.length} items`);
   };
 
   // Classify items into columns
@@ -204,24 +232,29 @@ export function App() {
     ].join('\n');
     navigator.clipboard.writeText(text).then(() => {
       setCopiedSummary(true);
+      announce('Copied');
       setTimeout(() => setCopiedSummary(false), 2000);
     });
-  }, [columns]);
+  }, [columns, announce]);
 
   // Parse preview for badge display
   const preview = useMemo(() => (input.trim() ? parseScript(input) : null), [input]);
 
   /* ── Render helpers ──────────────────────────────────────────────── */
 
-  const renderCard = (item: StandupItem) => (
+  const renderCard = (item: StandupItem, siblings: StandupItem[], headingId: string) => (
     <div key={item.id} style={styles.card}>
       <div style={styles.cardRow}>
         <button
           type="button"
           onClick={() => cycleStatus(item.id)}
+          aria-pressed={item.status === 'done'}
+          aria-label={`Done: ${item.title}`}
+          data-status-id={item.id}
           style={{
             ...styles.statusDot,
             background: item.status === 'done' ? 'var(--yap-success)' : 'var(--yap-border)',
+            borderColor: item.status === 'done' ? 'var(--yap-success)' : 'var(--yap-fg-faint)',
             boxShadow: item.status === 'done' ? '0 0 8px var(--yap-success-bg)' : 'none',
           }}
           title={item.status === 'done' ? 'Mark pending' : 'Mark done'}
@@ -234,8 +267,14 @@ export function App() {
         >
           {item.title}
         </span>
-        <button type="button" onClick={() => removeItem(item.id)} style={styles.removeBtn}>
-          &times;
+        <button
+          type="button"
+          onClick={() => removeItem(item.id, siblings, headingId)}
+          style={styles.removeBtn}
+          aria-label={`Remove ${item.title}`}
+          data-remove-id={item.id}
+        >
+          <span aria-hidden="true">&times;</span>
         </button>
       </div>
       <div style={styles.badges}>
@@ -248,18 +287,23 @@ export function App() {
     </div>
   );
 
-  const renderColumn = (title: string, colItems: StandupItem[], accent: string) => (
-    <div style={styles.column}>
-      <h2 style={{ ...styles.colHeader, borderLeftColor: accent }}>{title}</h2>
-      <div style={styles.colBody}>
-        {colItems.length === 0 ? (
-          <div style={styles.colEmpty}>No items</div>
-        ) : (
-          colItems.map(renderCard)
-        )}
+  /* level: board view columns are h2; in team view the person is h2 and their columns h3. */
+  const renderColumn = (title: string, colItems: StandupItem[], accent: string, idPrefix: string, level: 'h2' | 'h3') => {
+    const Heading = level;
+    const headingId = `${idPrefix}-${title.toLowerCase()}`;
+    return (
+      <div style={styles.column}>
+        <Heading id={headingId} tabIndex={-1} style={{ ...styles.colHeader, borderLeftColor: accent }}>{title}</Heading>
+        <div style={styles.colBody}>
+          {colItems.length === 0 ? (
+            <div style={styles.colEmpty}>No items</div>
+          ) : (
+            colItems.map((it) => renderCard(it, colItems, headingId))
+          )}
+        </div>
       </div>
-    </div>
-  );
+    );
+  };
 
   return (
     <div style={styles.root}>
@@ -281,7 +325,9 @@ export function App() {
       <main style={styles.main}>
         {/* Composer */}
         <form onSubmit={handleSubmit} style={styles.form}>
+          <label htmlFor="standup-input" className="sr-only">Add a task</label>
           <input
+            id="standup-input"
             type="text"
             value={input}
             onChange={(e) => setInput(e.target.value)}
@@ -327,23 +373,25 @@ export function App() {
           <div className="standups-team-view">
             {teamGroups.map(([name, group]) => (
               <div key={name} style={styles.teamRow}>
-                <h3 style={styles.teamName}>{name}</h3>
+                <h2 style={styles.teamName}>{name}</h2>
                 <div className="standups-columns" style={styles.columnsGrid}>
-                  {renderColumn('Yesterday', group.yesterday, 'var(--yap-success)')}
-                  {renderColumn('Today', group.today, ACCENT)}
-                  {renderColumn('Blockers', group.blockers, 'var(--yap-danger)')}
+                  {renderColumn('Yesterday', group.yesterday, 'var(--yap-success)', `team-${name}`, 'h3')}
+                  {renderColumn('Today', group.today, ACCENT, `team-${name}`, 'h3')}
+                  {renderColumn('Blockers', group.blockers, 'var(--yap-danger)', `team-${name}`, 'h3')}
                 </div>
               </div>
             ))}
           </div>
         ) : (
           <div className="standups-columns" style={styles.columnsGrid}>
-            {renderColumn('Yesterday', columns.yesterday, 'var(--yap-success)')}
-            {renderColumn('Today', columns.today, ACCENT)}
-            {renderColumn('Blockers', columns.blockers, 'var(--yap-danger)')}
+            {renderColumn('Yesterday', columns.yesterday, 'var(--yap-success)', 'board', 'h2')}
+            {renderColumn('Today', columns.today, ACCENT, 'board', 'h2')}
+            {renderColumn('Blockers', columns.blockers, 'var(--yap-danger)', 'board', 'h2')}
           </div>
         )}
       </main>
+
+      <p role="status" aria-live="polite" aria-atomic="true" className="sr-only">{status}</p>
 
       <footer style={styles.footer}>
         <span>
@@ -371,6 +419,8 @@ export function App() {
 const responsiveCSS = `
   * { box-sizing: border-box; margin: 0; padding: 0; }
   body { background: #080b10; }
+  .sr-only { position: absolute; width: 1px; height: 1px; margin: -1px; padding: 0; overflow: hidden; clip: rect(0 0 0 0); clip-path: inset(50%); white-space: nowrap; border: 0; }
+  input:focus-visible, select:focus-visible, textarea:focus-visible { outline: 2px solid var(--yap-ring); outline-offset: 2px; }
   .standups-columns {
     display: grid;
     grid-template-columns: 1fr 1fr 1fr;
@@ -394,34 +444,34 @@ const S: Record<string, React.CSSProperties> = {
   marketLink: { fontSize: 14, color: ACCENT, textDecoration: 'none', fontWeight: 500 },
   main: { flex: 1, maxWidth: 1120, margin: '0 auto', padding: '32px 24px', width: '100%', boxSizing: 'border-box' as const },
   form: { display: 'flex', gap: 12, marginBottom: 12 },
-  input: { flex: 1, padding: '12px 16px', borderRadius: 10, border: '1px solid var(--yap-border)', background: 'var(--yap-input-bg)', color: 'var(--yap-fg)', fontSize: 15, fontFamily: 'var(--yap-font-mono)', outline: 'none' },
-  addBtn: { padding: '12px 24px', borderRadius: 10, border: 'none', background: ACCENT, color: '#fff', fontSize: 15, fontWeight: 600, cursor: 'pointer' },
+  input: { flex: 1, padding: '12px 16px', borderRadius: 10, border: '1px solid var(--yap-fg-faint)', background: 'var(--yap-input-bg)', color: 'var(--yap-fg)', fontSize: 15, fontFamily: 'var(--yap-font-mono)' },
+  addBtn: { padding: '12px 24px', borderRadius: 10, border: 'none', background: ACCENT, color: 'var(--yap-bg)', fontSize: 15, fontWeight: 600, cursor: 'pointer' },
   preview: { display: 'flex', alignItems: 'center', gap: 8, padding: '8px 16px', marginBottom: 16, borderRadius: 8, background: 'var(--yap-accent-muted)', border: '1px solid var(--yap-accent-muted)', fontSize: 14, flexWrap: 'wrap' as const },
   previewTitle: { color: 'var(--yap-fg)', fontWeight: 500 },
   actions: { display: 'flex', flexWrap: 'wrap' as const, gap: 8, marginBottom: 28, alignItems: 'center' },
   actionBtn: { padding: '8px 16px', borderRadius: 8, border: '1px solid var(--yap-border-subtle)', background: 'var(--yap-border-subtle)', color: 'var(--yap-fg-muted)', fontSize: 13, fontWeight: 500, cursor: 'pointer', fontFamily: 'inherit' },
-  actionBtnActive: { background: 'var(--yap-accent-muted)', color: 'var(--yap-accent-hover)', borderColor: 'var(--yap-accent-muted)' },
-  countLabel: { marginLeft: 'auto', fontSize: 13, color: 'var(--yap-fg-faint)' },
+  actionBtnActive: { background: 'var(--yap-accent-muted)', color: 'var(--yap-info-fg)', borderColor: 'var(--yap-accent-muted)' },
+  countLabel: { marginLeft: 'auto', fontSize: 13, color: 'var(--yap-fg-muted)' },
   columnsGrid: {},
   column: { minWidth: 0 },
   colHeader: { fontSize: 15, fontWeight: 600, fontFamily: 'var(--yap-font-mono)', textTransform: 'uppercase' as const, letterSpacing: '.08em', color: 'var(--yap-fg-muted)', borderLeft: '3px solid', paddingLeft: 12, marginBottom: 16 },
   colBody: { display: 'flex', flexDirection: 'column' as const, gap: 10 },
-  colEmpty: { fontSize: 13, color: 'var(--yap-fg-faint)', padding: '20px 0', textAlign: 'center' as const },
-  card: { padding: 14, borderRadius: 12, border: '1px solid var(--yap-border)', background: 'var(--yap-card-bg)', cursor: 'pointer', transition: 'transform .15s, box-shadow .15s' },
+  colEmpty: { fontSize: 13, color: 'var(--yap-fg-muted)', padding: '20px 0', textAlign: 'center' as const },
+  card: { padding: 14, borderRadius: 12, border: '1px solid var(--yap-border)', background: 'var(--yap-card-bg)', transition: 'transform .15s, box-shadow .15s' },
   cardRow: { display: 'flex', alignItems: 'center', gap: 10, marginBottom: 6 },
-  statusDot: { width: 14, height: 14, borderRadius: '50%', border: 'none', cursor: 'pointer', flexShrink: 0, transition: 'background .2s, box-shadow .2s' },
+  statusDot: { width: 14, height: 14, borderRadius: '50%', border: '2px solid var(--yap-fg-faint)', padding: 0, boxSizing: 'border-box' as const, cursor: 'pointer', flexShrink: 0, transition: 'background .2s, box-shadow .2s' },
   cardTitle: { flex: 1, fontSize: 15, fontWeight: 500, lineHeight: 1.35 },
-  removeBtn: { border: 'none', background: 'none', color: 'var(--yap-fg-faint)', fontSize: 18, cursor: 'pointer', padding: '0 4px', flexShrink: 0 },
+  removeBtn: { border: 'none', background: 'none', color: 'var(--yap-fg-muted)', fontSize: 18, cursor: 'pointer', padding: '0 4px', flexShrink: 0 },
   badges: { display: 'flex', flexWrap: 'wrap' as const, gap: 5, paddingLeft: 24 },
   badge: { padding: '2px 7px', borderRadius: 5, fontSize: 12, fontWeight: 600, fontFamily: 'var(--yap-font-mono)' },
   badgeAssignee: { background: 'var(--yap-accent-muted)', color: 'var(--yap-info-fg)' },
-  badgePriority: { background: 'var(--yap-warning-bg)', color: 'var(--yap-priority-high)' },
+  badgePriority: { background: 'var(--yap-warning-bg)', color: 'var(--yap-warning-fg)' },
   badgeWorkspace: { background: 'var(--yap-success-bg)', color: 'var(--yap-success-fg)' },
-  badgeBlocker: { background: 'var(--yap-danger-bg)', color: 'var(--yap-danger)' },
-  badgeDue: { background: 'var(--yap-accent-muted)', color: 'var(--yap-accent-hover)' },
+  badgeBlocker: { background: 'var(--yap-danger-bg)', color: 'var(--yap-danger-fg)' },
+  badgeDue: { background: 'var(--yap-accent-muted)', color: 'var(--yap-info-fg)' },
   teamRow: { marginBottom: 32, paddingBottom: 24, borderBottom: '1px solid var(--yap-border-subtle)' },
   teamName: { fontSize: 16, fontWeight: 600, color: 'var(--yap-fg)', marginBottom: 14, textTransform: 'capitalize' as const },
-  footer: { borderTop: '1px solid var(--yap-border)', padding: '20px 24px', display: 'flex', justifyContent: 'center', gap: 12, fontSize: 13, color: 'var(--yap-fg-faint)' },
-  footerLink: { color: ACCENT, textDecoration: 'none' },
+  footer: { borderTop: '1px solid var(--yap-border)', padding: '20px 24px', display: 'flex', justifyContent: 'center', gap: 12, fontSize: 13, color: 'var(--yap-fg-muted)' },
+  footerLink: { color: ACCENT, textDecoration: 'underline' },
 };
 const styles = S;

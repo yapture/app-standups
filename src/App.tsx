@@ -1,41 +1,13 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent } from 'react';
+import { createBackup, isStandupItem, MAX_BACKUP_BYTES, parseBackup, type StandupItem } from './backup';
 
 /* ── Types ─────────────────────────────────────────────────────────── */
-
-interface StandupItem {
-  id: string;
-  raw: string;
-  title: string;
-  assignee: string | null;
-  priority: string | null;
-  workspace: string | null;
-  isBlocker: boolean;
-  dueDate: string | null;
-  status: 'pending' | 'done';
-  createdAt: string;
-}
 
 type Column = 'yesterday' | 'today' | 'blockers';
 
 /* ── Persistence ───────────────────────────────────────────────────── */
 
 const STORAGE_KEY = 'yapture.app-standups.items.v1';
-
-function isStandupItem(value: unknown): value is StandupItem {
-  if (!value || typeof value !== 'object') return false;
-  const item = value as Record<string, unknown>;
-  const nullableString = (field: string) => item[field] === null || typeof item[field] === 'string';
-  return typeof item.id === 'string'
-    && typeof item.raw === 'string'
-    && typeof item.title === 'string'
-    && typeof item.createdAt === 'string'
-    && (item.status === 'pending' || item.status === 'done')
-    && typeof item.isBlocker === 'boolean'
-    && nullableString('assignee')
-    && nullableString('priority')
-    && nullableString('workspace')
-    && nullableString('dueDate');
-}
 
 export function loadItems(): StandupItem[] {
   try {
@@ -147,6 +119,8 @@ export function App() {
   const [copyError, setCopyError] = useState(false);
   const [status, setStatus] = useState('');
   const [storageWarning, setStorageWarning] = useState(false);
+  const [backupFeedback, setBackupFeedback] = useState('');
+  const backupInput = useRef<HTMLInputElement>(null);
   const flip = useRef(false);
   const pendingFocus = useRef<{ selector: string | null; fallbacks: string[] } | null>(null);
 
@@ -166,8 +140,12 @@ export function App() {
     const p = pendingFocus.current;
     if (!p) return;
     pendingFocus.current = null;
-    const el = (p.selector && document.querySelector<HTMLElement>(p.selector))
-      || p.fallbacks.map((id) => document.getElementById(id)).find(Boolean);
+    let target: HTMLElement | null = null;
+    if (p.selector) {
+      try { target = document.querySelector<HTMLElement>(p.selector); }
+      catch { /* A restored record ID may not be valid CSS selector syntax. */ }
+    }
+    const el = target || p.fallbacks.map((id) => document.getElementById(id)).find(Boolean);
     el?.focus();
   }, [items]);
 
@@ -194,7 +172,7 @@ export function App() {
       if (!cur) return;
       const nextStatus: StandupItem['status'] = cur.status === 'pending' ? 'done' : 'pending';
       /* The card may move to another column and remount, so re-find its toggle afterwards. */
-      pendingFocus.current = { selector: `[data-status-id="${id}"]`, fallbacks: ['standup-input'] };
+      pendingFocus.current = { selector: `[data-status-id="${CSS.escape(id)}"]`, fallbacks: ['standup-input'] };
       persist(items.map((it) => (it.id !== id ? it : { ...it, status: nextStatus })));
       announce(nextStatus === 'done' ? `Marked ${cur.title} done` : `Marked ${cur.title} pending`);
     },
@@ -206,7 +184,7 @@ export function App() {
       const gone = items.find((it) => it.id === id);
       const i = siblings.findIndex((it) => it.id === id);
       const next = siblings[i + 1] ?? siblings[i - 1];
-      pendingFocus.current = { selector: next ? `[data-remove-id="${next.id}"]` : null, fallbacks: [headingId, 'standup-input'] };
+      pendingFocus.current = { selector: next ? `[data-remove-id="${CSS.escape(next.id)}"]` : null, fallbacks: [headingId, 'standup-input'] };
       persist(items.filter((it) => it.id !== id));
       if (gone) announce(`Removed ${gone.title}`);
     },
@@ -279,6 +257,51 @@ export function App() {
     announce('Copied');
     setTimeout(() => setCopiedSummary(false), 2000);
   }, [columns, announce]);
+
+  const downloadBackup = useCallback(() => {
+    try {
+      const blob = new Blob([createBackup(items)], { type: 'application/json' });
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement('a');
+      link.href = url;
+      link.download = `standups-backup-${new Date().toISOString().slice(0, 10)}.json`;
+      document.body.appendChild(link);
+      try { link.click(); }
+      finally { link.remove(); setTimeout(() => URL.revokeObjectURL(url), 60_000); }
+      setBackupFeedback('Backup download started. Keep the JSON file somewhere safe.');
+      announce('Backup download started');
+    } catch {
+      setBackupFeedback('Could not create backup.');
+      announce('Could not create backup');
+    }
+  }, [items, announce]);
+
+  const restoreBackup = useCallback(async (file: File | undefined) => {
+    if (!file) return;
+    try {
+      if (file.size > MAX_BACKUP_BYTES) throw new Error('Backup exceeds 1 MiB');
+      const backup = parseBackup(await file.text());
+      if (items.length !== 0 || loadItems().length !== 0) {
+        throw new Error('Restore requires an empty board. Download a backup of this board first.');
+      }
+      const itemsBeforeConfirm = localStorage.getItem(STORAGE_KEY);
+      if (!window.confirm(`Restore ${backup.items.length} standup items?`)) return;
+      if (localStorage.getItem(STORAGE_KEY) !== itemsBeforeConfirm || loadItems().length !== 0) {
+        throw new Error('Board changed in another tab. Reload before restoring.');
+      }
+      if (!saveItems(backup.items)) throw new Error('Could not save restored items');
+      setItems(backup.items);
+      setStorageWarning(false);
+      setBackupFeedback(`Restored ${backup.items.length} standup items.`);
+      announce(`Restored ${backup.items.length} standup items`);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Could not restore backup';
+      setBackupFeedback(message);
+      announce(message);
+    } finally {
+      if (backupInput.current) backupInput.current.value = '';
+    }
+  }, [items, announce]);
 
   // Parse preview for badge display
   const preview = useMemo(() => (input.trim() ? parseScript(input) : null), [input]);
@@ -409,9 +432,14 @@ export function App() {
           <button type="button" onClick={generateSummary} style={styles.actionBtn}>
             {copiedSummary ? 'Copied!' : 'Generate summary'}
           </button>
+          <button type="button" onClick={downloadBackup} style={styles.actionBtn}>Download backup</button>
+          <input ref={backupInput} type="file" accept="application/json,.json" className="sr-only"
+            aria-label="Choose Standups backup" onChange={(e) => { void restoreBackup(e.target.files?.[0]); }} />
+          <button type="button" onClick={() => backupInput.current?.click()} style={styles.actionBtn}>Restore backup</button>
           <span style={styles.countLabel}>{items.length} item{items.length !== 1 ? 's' : ''}</span>
         </div>
         {copyError && <p role="alert">Could not copy. Check clipboard permissions and try again.</p>}
+        {backupFeedback && <p role="alert">{backupFeedback}</p>}
 
         {/* Board */}
         {teamView && teamGroups ? (

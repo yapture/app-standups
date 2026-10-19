@@ -21,17 +21,53 @@ type Column = 'yesterday' | 'today' | 'blockers';
 
 const STORAGE_KEY = 'yapture.app-standups.items.v1';
 
-function loadItems(): StandupItem[] {
+function isStandupItem(value: unknown): value is StandupItem {
+  if (!value || typeof value !== 'object') return false;
+  const item = value as Record<string, unknown>;
+  const nullableString = (field: string) => item[field] === null || typeof item[field] === 'string';
+  return typeof item.id === 'string'
+    && typeof item.raw === 'string'
+    && typeof item.title === 'string'
+    && typeof item.createdAt === 'string'
+    && (item.status === 'pending' || item.status === 'done')
+    && typeof item.isBlocker === 'boolean'
+    && nullableString('assignee')
+    && nullableString('priority')
+    && nullableString('workspace')
+    && nullableString('dueDate');
+}
+
+export function loadItems(): StandupItem[] {
   try {
     const raw = localStorage.getItem(STORAGE_KEY);
-    return raw ? JSON.parse(raw) : [];
+    if (!raw) return [];
+    const parsed: unknown = JSON.parse(raw);
+    return Array.isArray(parsed) ? parsed.filter(isStandupItem) : [];
   } catch {
     return [];
   }
 }
 
-function saveItems(items: StandupItem[]) {
-  localStorage.setItem(STORAGE_KEY, JSON.stringify(items));
+export function saveItems(items: StandupItem[]): boolean {
+  try {
+    const raw = localStorage.getItem(STORAGE_KEY);
+    if (raw !== null) {
+      const prior: unknown = JSON.parse(raw);
+      if (!Array.isArray(prior) || !prior.every(isStandupItem)) return false;
+    }
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(items));
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+export async function copyText(text: string): Promise<boolean> {
+  try {
+    if (!navigator.clipboard?.writeText) return false;
+    await navigator.clipboard.writeText(text);
+    return true;
+  } catch { return false; }
 }
 
 /* ── Parser ────────────────────────────────────────────────────────── */
@@ -108,13 +144,15 @@ export function App() {
   const [input, setInput] = useState('');
   const [teamView, setTeamView] = useState(false);
   const [copiedSummary, setCopiedSummary] = useState(false);
+  const [copyError, setCopyError] = useState(false);
   const [status, setStatus] = useState('');
+  const [storageWarning, setStorageWarning] = useState(false);
   const flip = useRef(false);
   const pendingFocus = useRef<{ selector: string | null; fallbacks: string[] } | null>(null);
 
   const persist = useCallback((next: StandupItem[]) => {
     setItems(next);
-    saveItems(next);
+    if (!saveItems(next)) setStorageWarning(true);
   }, []);
 
   /* Polite live-region message; alternate a trailing nbsp so repeats are re-announced. */
@@ -223,18 +261,23 @@ export function App() {
   }, [items, teamView]);
 
   // Generate Slack summary
-  const generateSummary = useCallback(() => {
+  const generateSummary = useCallback(async () => {
+    setCopyError(false);
     const fmt = (arr: StandupItem[]) => arr.map((i) => i.title).join(', ') || 'None';
     const text = [
       `*Yesterday:* ${fmt(columns.yesterday)}`,
       `*Today:* ${fmt(columns.today)}`,
       `*Blockers:* ${fmt(columns.blockers)}`,
     ].join('\n');
-    navigator.clipboard.writeText(text).then(() => {
-      setCopiedSummary(true);
-      announce('Copied');
-      setTimeout(() => setCopiedSummary(false), 2000);
-    });
+    if (!(await copyText(text))) {
+      setCopiedSummary(false);
+      setCopyError(true);
+      announce('Could not copy. Check clipboard permissions.');
+      return;
+    }
+    setCopiedSummary(true);
+    announce('Copied');
+    setTimeout(() => setCopiedSummary(false), 2000);
   }, [columns, announce]);
 
   // Parse preview for badge display
@@ -323,6 +366,7 @@ export function App() {
       </header>
 
       <main style={styles.main}>
+        {storageWarning && <p role="alert">Changes could not be saved. They may disappear when you reload this page.</p>}
         {/* Composer */}
         <form onSubmit={handleSubmit} style={styles.form}>
           <label htmlFor="standup-input" className="sr-only">Add a task</label>
@@ -367,6 +411,7 @@ export function App() {
           </button>
           <span style={styles.countLabel}>{items.length} item{items.length !== 1 ? 's' : ''}</span>
         </div>
+        {copyError && <p role="alert">Could not copy. Check clipboard permissions and try again.</p>}
 
         {/* Board */}
         {teamView && teamGroups ? (

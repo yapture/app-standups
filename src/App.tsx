@@ -1,8 +1,9 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent } from 'react';
+import { BoardStore } from './board-store';
 
 /* ── Types ─────────────────────────────────────────────────────────── */
 
-interface StandupItem {
+export interface StandupItem {
   id: string;
   raw: string;
   title: string;
@@ -140,20 +141,71 @@ const ACCENT = 'var(--yap-feature-notes)';
 /* ── Component ─────────────────────────────────────────────────────── */
 
 export function App() {
-  const [items, setItems] = useState<StandupItem[]>(loadItems);
+  const [items, setItems] = useState<StandupItem[]>([]);
   const [input, setInput] = useState('');
   const [teamView, setTeamView] = useState(false);
   const [copiedSummary, setCopiedSummary] = useState(false);
   const [copyError, setCopyError] = useState(false);
   const [status, setStatus] = useState('');
   const [storageWarning, setStorageWarning] = useState(false);
+  const [ready, setReady] = useState(false);
+  const [loadError, setLoadError] = useState(false);
+  const [conflict, setConflict] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const [recoveryFeedback, setRecoveryFeedback] = useState('');
+  const storeRef = useRef<BoardStore | null>(null);
+  const revisionRef = useRef<number | null>(null);
+  const savingRef = useRef(false);
   const flip = useRef(false);
   const pendingFocus = useRef<{ selector: string | null; fallbacks: string[] } | null>(null);
 
-  const persist = useCallback((next: StandupItem[]) => {
-    setItems(next);
-    if (!saveItems(next)) setStorageWarning(true);
+  useEffect(() => {
+    let cancelled = false;
+    let opened: BoardStore | null = null;
+    let opening: Promise<{ store: BoardStore; board: import('./board-store').BoardSnapshot }>;
+    try { opening = BoardStore.open(indexedDB, () => localStorage); }
+    catch { setLoadError(true); return; }
+    void opening.then(({ store, board }) => {
+      if (cancelled) { store.close(); return; }
+      opened = store;
+      storeRef.current = store;
+      revisionRef.current = board.revision;
+      setItems(board.items);
+      setReady(true);
+    }).catch(() => { if (!cancelled) setLoadError(true); });
+    return () => {
+      cancelled = true;
+      opened?.close();
+      if (storeRef.current === opened) storeRef.current = null;
+    };
   }, []);
+
+  useEffect(() => {
+    const onLegacyWrite = (event: StorageEvent) => {
+      if (event.key === STORAGE_KEY) setStorageWarning(true);
+    };
+    window.addEventListener('storage', onLegacyWrite);
+    return () => window.removeEventListener('storage', onLegacyWrite);
+  }, []);
+
+  const persist = useCallback(async (next: StandupItem[]): Promise<boolean> => {
+    if (conflict || savingRef.current || !storeRef.current || revisionRef.current === null) return false;
+    savingRef.current = true;
+    setSaving(true);
+    try {
+      const result = await storeRef.current.commit(revisionRef.current, next);
+      if (result.state === 'saved') {
+        revisionRef.current = result.revision;
+        setItems(next);
+        return true;
+      }
+    } catch { /* Keep the attempted collection available for export. */ }
+    finally { savingRef.current = false; setSaving(false); }
+    setItems(next);
+    setConflict(true);
+    setStorageWarning(true);
+    return false;
+  }, [conflict]);
 
   /* Polite live-region message; alternate a trailing nbsp so repeats are re-announced. */
   const announce = useCallback((msg: string) => {
@@ -166,13 +218,15 @@ export function App() {
     const p = pendingFocus.current;
     if (!p) return;
     pendingFocus.current = null;
-    const el = (p.selector && document.querySelector<HTMLElement>(p.selector))
-      || p.fallbacks.map((id) => document.getElementById(id)).find(Boolean);
+    let selected: HTMLElement | null = null;
+    try { if (p.selector) selected = document.querySelector<HTMLElement>(p.selector); }
+    catch { /* A legacy record ID can contain CSS selector metacharacters. */ }
+    const el = selected || p.fallbacks.map((id) => document.getElementById(id)).find(Boolean);
     el?.focus();
   }, [items]);
 
   const addItem = useCallback(
-    (text: string, forceStatus?: StandupItem['status']) => {
+    async (text: string, forceStatus?: StandupItem['status']) => {
       if (!text.trim()) return;
       const parsed = parseScript(text);
       const item: StandupItem = {
@@ -181,7 +235,7 @@ export function App() {
         status: forceStatus ?? 'pending',
         createdAt: new Date().toISOString(),
       };
-      persist([item, ...items]);
+      if (!(await persist([item, ...items]))) return;
       setInput('');
       announce(`Added ${item.title}`);
     },
@@ -189,25 +243,25 @@ export function App() {
   );
 
   const cycleStatus = useCallback(
-    (id: string) => {
+    async (id: string) => {
       const cur = items.find((it) => it.id === id);
       if (!cur) return;
       const nextStatus: StandupItem['status'] = cur.status === 'pending' ? 'done' : 'pending';
       /* The card may move to another column and remount, so re-find its toggle afterwards. */
       pendingFocus.current = { selector: `[data-status-id="${id}"]`, fallbacks: ['standup-input'] };
-      persist(items.map((it) => (it.id !== id ? it : { ...it, status: nextStatus })));
+      if (!(await persist(items.map((it) => (it.id !== id ? it : { ...it, status: nextStatus }))))) return;
       announce(nextStatus === 'done' ? `Marked ${cur.title} done` : `Marked ${cur.title} pending`);
     },
     [items, persist, announce],
   );
 
   const removeItem = useCallback(
-    (id: string, siblings: StandupItem[], headingId: string) => {
+    async (id: string, siblings: StandupItem[], headingId: string) => {
       const gone = items.find((it) => it.id === id);
       const i = siblings.findIndex((it) => it.id === id);
       const next = siblings[i + 1] ?? siblings[i - 1];
       pendingFocus.current = { selector: next ? `[data-remove-id="${next.id}"]` : null, fallbacks: [headingId, 'standup-input'] };
-      persist(items.filter((it) => it.id !== id));
+      if (!(await persist(items.filter((it) => it.id !== id)))) return;
       if (gone) announce(`Removed ${gone.title}`);
     },
     [items, persist, announce],
@@ -215,10 +269,10 @@ export function App() {
 
   const handleSubmit = (e: FormEvent) => {
     e.preventDefault();
-    addItem(input);
+    void addItem(input);
   };
 
-  const loadExamples = () => {
+  const loadExamples = async () => {
     const newItems = EXAMPLE_ITEMS.map((ex) => {
       const parsed = parseScript(ex.text);
       return {
@@ -228,7 +282,7 @@ export function App() {
         createdAt: new Date().toISOString(),
       } as StandupItem;
     });
-    persist([...newItems, ...items]);
+    if (!(await persist([...newItems, ...items]))) return;
     announce(`Added ${newItems.length} items`);
   };
 
@@ -280,6 +334,47 @@ export function App() {
     setTimeout(() => setCopiedSummary(false), 2000);
   }, [columns, announce]);
 
+  const downloadRecovery = useCallback(() => {
+    try {
+      const data = JSON.stringify({
+        app: 'yapture-standups', schemaVersion: 1,
+        exportedAt: new Date().toISOString(), items,
+      }, null, 2);
+      const url = URL.createObjectURL(new Blob([data], { type: 'application/json' }));
+      const link = document.createElement('a');
+      link.href = url;
+      link.download = `standups-unsaved-${new Date().toISOString().slice(0, 10)}.json`;
+      document.body.append(link);
+      try { link.click(); }
+      finally { link.remove(); setTimeout(() => URL.revokeObjectURL(url), 60_000); }
+      setRecoveryFeedback('Unsaved Standups JSON download started. Keep it before reloading.');
+      announce('Unsaved Standups download started');
+    } catch {
+      setRecoveryFeedback('Could not download unsaved data. Keep this tab open.');
+      announce('Could not download unsaved data');
+    }
+  }, [items, announce]);
+
+  const downloadLegacyRecovery = () => {
+    try {
+      const data = JSON.stringify({
+        app: 'yapture-standups', schemaVersion: 1,
+        exportedAt: new Date().toISOString(),
+        legacyItemsRaw: localStorage.getItem(STORAGE_KEY),
+      }, null, 2);
+      const url = URL.createObjectURL(new Blob([data], { type: 'application/json' }));
+      const link = document.createElement('a');
+      link.href = url;
+      link.download = `standups-legacy-recovery-${new Date().toISOString().slice(0, 10)}.json`;
+      document.body.append(link);
+      try { link.click(); }
+      finally { link.remove(); setTimeout(() => URL.revokeObjectURL(url), 60_000); }
+      setRecoveryFeedback('Original browser data download started. Keep it before changing this browser.');
+    } catch {
+      setRecoveryFeedback('Browser storage could not be read. Keep this tab and browser profile intact.');
+    }
+  };
+
   // Parse preview for badge display
   const preview = useMemo(() => (input.trim() ? parseScript(input) : null), [input]);
 
@@ -290,7 +385,8 @@ export function App() {
       <div style={styles.cardRow}>
         <button
           type="button"
-          onClick={() => cycleStatus(item.id)}
+          disabled={conflict || saving}
+          onClick={() => { void cycleStatus(item.id); }}
           aria-pressed={item.status === 'done'}
           aria-label={`Done: ${item.title}`}
           data-status-id={item.id}
@@ -312,7 +408,8 @@ export function App() {
         </span>
         <button
           type="button"
-          onClick={() => removeItem(item.id, siblings, headingId)}
+          disabled={conflict || saving}
+          onClick={() => { void removeItem(item.id, siblings, headingId); }}
           style={styles.removeBtn}
           aria-label={`Remove ${item.title}`}
           data-remove-id={item.id}
@@ -348,6 +445,13 @@ export function App() {
     );
   };
 
+  if (loadError) return <main role="alert">
+    <p>Standups storage could not be opened. Your older browser data was left untouched. Close older tabs and reload after saving a recovery copy.</p>
+    <button type="button" onClick={downloadLegacyRecovery}>Download original browser data</button>
+    {recoveryFeedback && <p role="status">{recoveryFeedback}</p>}
+  </main>;
+  if (!ready) return <main role="status">Loading Standups…</main>;
+
   return (
     <div style={styles.root}>
       {/* Responsive styles injected via <style> tag */}
@@ -366,7 +470,12 @@ export function App() {
       </header>
 
       <main style={styles.main}>
-        {storageWarning && <p role="alert">Changes could not be saved. They may disappear when you reload this page.</p>}
+        {storageWarning && <p role="alert">{conflict
+          ? 'Another tab changed this board or storage failed. This tab holds unsaved data. Download its JSON before reloading.'
+          : 'An older tab changed browser storage. This tab’s database may not include that change. Download the original browser data, close older tabs, then reload.'}</p>}
+        {storageWarning && <button type="button" onClick={downloadLegacyRecovery} style={styles.actionBtn}>Download original browser data</button>}
+        {conflict && <button type="button" onClick={downloadRecovery} style={styles.actionBtn}>Download unsaved JSON</button>}
+        {storageWarning && recoveryFeedback && <p role="status">{recoveryFeedback}</p>}
         {/* Composer */}
         <form onSubmit={handleSubmit} style={styles.form}>
           <label htmlFor="standup-input" className="sr-only">Add a task</label>
@@ -378,7 +487,7 @@ export function App() {
             placeholder="Add a task — try: Fix auth bug #+alex #@backend #!high #blocker due:today"
             style={styles.input}
           />
-          <button type="submit" disabled={!input.trim()} style={styles.addBtn}>
+          <button type="submit" disabled={conflict || saving || !input.trim()} style={styles.addBtn}>
             Add
           </button>
         </form>
@@ -397,7 +506,7 @@ export function App() {
 
         {/* Actions bar */}
         <div style={styles.actions}>
-          <button type="button" onClick={loadExamples} style={styles.actionBtn}>
+          <button type="button" disabled={conflict || saving} onClick={() => { void loadExamples(); }} style={styles.actionBtn}>
             + Team standup
           </button>
           <button type="button" onClick={() => setTeamView(!teamView)} style={{

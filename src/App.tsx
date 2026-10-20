@@ -1,41 +1,16 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent } from 'react';
+import { BoardStore } from './board-store';
+import { createBackup, isStandupItem, MAX_BACKUP_BYTES, parseBackup, type StandupItem } from './backup';
 
 /* ── Types ─────────────────────────────────────────────────────────── */
 
-interface StandupItem {
-  id: string;
-  raw: string;
-  title: string;
-  assignee: string | null;
-  priority: string | null;
-  workspace: string | null;
-  isBlocker: boolean;
-  dueDate: string | null;
-  status: 'pending' | 'done';
-  createdAt: string;
-}
+export type { StandupItem } from './backup';
 
 type Column = 'yesterday' | 'today' | 'blockers';
 
 /* ── Persistence ───────────────────────────────────────────────────── */
 
 const STORAGE_KEY = 'yapture.app-standups.items.v1';
-
-function isStandupItem(value: unknown): value is StandupItem {
-  if (!value || typeof value !== 'object') return false;
-  const item = value as Record<string, unknown>;
-  const nullableString = (field: string) => item[field] === null || typeof item[field] === 'string';
-  return typeof item.id === 'string'
-    && typeof item.raw === 'string'
-    && typeof item.title === 'string'
-    && typeof item.createdAt === 'string'
-    && (item.status === 'pending' || item.status === 'done')
-    && typeof item.isBlocker === 'boolean'
-    && nullableString('assignee')
-    && nullableString('priority')
-    && nullableString('workspace')
-    && nullableString('dueDate');
-}
 
 export function loadItems(): StandupItem[] {
   try {
@@ -140,19 +115,86 @@ const ACCENT = 'var(--yap-feature-notes)';
 /* ── Component ─────────────────────────────────────────────────────── */
 
 export function App() {
-  const [items, setItems] = useState<StandupItem[]>(loadItems);
+  const [items, setItems] = useState<StandupItem[]>([]);
   const [input, setInput] = useState('');
   const [teamView, setTeamView] = useState(false);
   const [copiedSummary, setCopiedSummary] = useState(false);
   const [copyError, setCopyError] = useState(false);
   const [status, setStatus] = useState('');
   const [storageWarning, setStorageWarning] = useState(false);
+  const [ready, setReady] = useState(false);
+  const [loadError, setLoadError] = useState(false);
+  const [conflict, setConflict] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const [recoveryFeedback, setRecoveryFeedback] = useState('');
+  const [backupFeedback, setBackupFeedback] = useState('');
+  const backupInput = useRef<HTMLInputElement>(null);
+  const storeRef = useRef<BoardStore | null>(null);
+  const revisionRef = useRef<number | null>(null);
+  const boardRef = useRef<StandupItem[]>([]);
+  const conflictRef = useRef(false);
+  const legacyWriteRef = useRef(false);
+  const savingRef = useRef(false);
   const flip = useRef(false);
   const pendingFocus = useRef<{ selector: string | null; fallbacks: string[] } | null>(null);
 
-  const persist = useCallback((next: StandupItem[]) => {
+  useEffect(() => {
+    let cancelled = false;
+    let opened: BoardStore | null = null;
+    let opening: ReturnType<typeof BoardStore.open>;
+    try { opening = BoardStore.open(indexedDB, () => localStorage); }
+    catch { setLoadError(true); return; }
+    void opening.then(({ store, board, legacyChanged }) => {
+      if (cancelled) { store.close(); return; }
+      opened = store;
+      storeRef.current = store;
+      revisionRef.current = board.revision;
+      boardRef.current = board.items;
+      setItems(board.items);
+      if (legacyChanged) { legacyWriteRef.current = true; setStorageWarning(true); }
+      setReady(true);
+    }).catch(() => { if (!cancelled) setLoadError(true); });
+    return () => {
+      cancelled = true;
+      opened?.close();
+      if (storeRef.current === opened) storeRef.current = null;
+    };
+  }, []);
+
+  useEffect(() => {
+    const onLegacyWrite = (event: StorageEvent) => {
+      if (event.key === STORAGE_KEY) { legacyWriteRef.current = true; setStorageWarning(true); }
+    };
+    window.addEventListener('storage', onLegacyWrite);
+    return () => window.removeEventListener('storage', onLegacyWrite);
+  }, []);
+
+  const persist = useCallback(async (next: StandupItem[]): Promise<boolean> => {
+    if (conflictRef.current || savingRef.current || !storeRef.current || revisionRef.current === null) return false;
+    if (legacyWriteRef.current) {
+      conflictRef.current = true;
+      setItems(next);
+      setConflict(true);
+      setStorageWarning(true);
+      return false;
+    }
+    savingRef.current = true;
+    setSaving(true);
+    try {
+      const result = await storeRef.current.commit(revisionRef.current, next);
+      if (result.state === 'saved') {
+        revisionRef.current = result.revision;
+        boardRef.current = next;
+        setItems(next);
+        return true;
+      }
+    } catch { /* Keep the attempted collection available for export. */ }
+    finally { savingRef.current = false; setSaving(false); }
     setItems(next);
-    if (!saveItems(next)) setStorageWarning(true);
+    conflictRef.current = true;
+    setConflict(true);
+    setStorageWarning(true);
+    return false;
   }, []);
 
   /* Polite live-region message; alternate a trailing nbsp so repeats are re-announced. */
@@ -166,13 +208,15 @@ export function App() {
     const p = pendingFocus.current;
     if (!p) return;
     pendingFocus.current = null;
-    const el = (p.selector && document.querySelector<HTMLElement>(p.selector))
-      || p.fallbacks.map((id) => document.getElementById(id)).find(Boolean);
+    let selected: HTMLElement | null = null;
+    try { if (p.selector) selected = document.querySelector<HTMLElement>(p.selector); }
+    catch { /* A legacy record ID can contain CSS selector metacharacters. */ }
+    const el = selected || p.fallbacks.map((id) => document.getElementById(id)).find(Boolean);
     el?.focus();
   }, [items]);
 
   const addItem = useCallback(
-    (text: string, forceStatus?: StandupItem['status']) => {
+    async (text: string, forceStatus?: StandupItem['status']) => {
       if (!text.trim()) return;
       const parsed = parseScript(text);
       const item: StandupItem = {
@@ -181,7 +225,7 @@ export function App() {
         status: forceStatus ?? 'pending',
         createdAt: new Date().toISOString(),
       };
-      persist([item, ...items]);
+      if (!(await persist([item, ...items]))) return;
       setInput('');
       announce(`Added ${item.title}`);
     },
@@ -189,25 +233,25 @@ export function App() {
   );
 
   const cycleStatus = useCallback(
-    (id: string) => {
+    async (id: string) => {
       const cur = items.find((it) => it.id === id);
       if (!cur) return;
       const nextStatus: StandupItem['status'] = cur.status === 'pending' ? 'done' : 'pending';
       /* The card may move to another column and remount, so re-find its toggle afterwards. */
-      pendingFocus.current = { selector: `[data-status-id="${id}"]`, fallbacks: ['standup-input'] };
-      persist(items.map((it) => (it.id !== id ? it : { ...it, status: nextStatus })));
+      pendingFocus.current = { selector: `[data-status-id="${CSS.escape(id)}"]`, fallbacks: ['standup-input'] };
+      if (!(await persist(items.map((it) => (it.id !== id ? it : { ...it, status: nextStatus }))))) return;
       announce(nextStatus === 'done' ? `Marked ${cur.title} done` : `Marked ${cur.title} pending`);
     },
     [items, persist, announce],
   );
 
   const removeItem = useCallback(
-    (id: string, siblings: StandupItem[], headingId: string) => {
+    async (id: string, siblings: StandupItem[], headingId: string) => {
       const gone = items.find((it) => it.id === id);
       const i = siblings.findIndex((it) => it.id === id);
       const next = siblings[i + 1] ?? siblings[i - 1];
-      pendingFocus.current = { selector: next ? `[data-remove-id="${next.id}"]` : null, fallbacks: [headingId, 'standup-input'] };
-      persist(items.filter((it) => it.id !== id));
+      pendingFocus.current = { selector: next ? `[data-remove-id="${CSS.escape(next.id)}"]` : null, fallbacks: [headingId, 'standup-input'] };
+      if (!(await persist(items.filter((it) => it.id !== id)))) return;
       if (gone) announce(`Removed ${gone.title}`);
     },
     [items, persist, announce],
@@ -215,10 +259,10 @@ export function App() {
 
   const handleSubmit = (e: FormEvent) => {
     e.preventDefault();
-    addItem(input);
+    void addItem(input);
   };
 
-  const loadExamples = () => {
+  const loadExamples = async () => {
     const newItems = EXAMPLE_ITEMS.map((ex) => {
       const parsed = parseScript(ex.text);
       return {
@@ -228,9 +272,56 @@ export function App() {
         createdAt: new Date().toISOString(),
       } as StandupItem;
     });
-    persist([...newItems, ...items]);
+    if (!(await persist([...newItems, ...items]))) return;
     announce(`Added ${newItems.length} items`);
   };
+
+  const downloadBackup = useCallback(() => {
+    try {
+      const url = URL.createObjectURL(new Blob([createBackup(items)], { type: 'application/json' }));
+      const link = document.createElement('a');
+      link.href = url;
+      link.download = `standups-backup-${new Date().toISOString().slice(0, 10)}.json`;
+      document.body.append(link);
+      try { link.click(); }
+      finally { link.remove(); setTimeout(() => URL.revokeObjectURL(url), 60_000); }
+      setBackupFeedback('Backup download started. Keep the JSON file somewhere safe.');
+      announce('Backup download started');
+    } catch {
+      setBackupFeedback('Could not create backup.');
+      announce('Could not create backup');
+    }
+  }, [items, announce]);
+
+  const restoreBackup = useCallback(async (file: File | undefined) => {
+    if (!file) return;
+    setBackupFeedback('');
+    try {
+      if (file.size > MAX_BACKUP_BYTES) throw new Error('Backup exceeds 1 MiB');
+      const backup = parseBackup(await file.text());
+      const revision = revisionRef.current;
+      if (revision === null || boardRef.current.length || conflictRef.current || savingRef.current || legacyWriteRef.current) {
+        throw new Error('Restore requires an empty, unchanged board. Download a backup and reload before restoring.');
+      }
+      const legacyBeforeConfirm = localStorage.getItem(STORAGE_KEY);
+      if (!window.confirm(`Restore ${backup.items.length} standup items?`)) return;
+      if (revisionRef.current !== revision || boardRef.current.length || conflictRef.current
+        || savingRef.current || legacyWriteRef.current || localStorage.getItem(STORAGE_KEY) !== legacyBeforeConfirm) {
+        throw new Error('Board changed in another tab. Reload before restoring.');
+      }
+      if (!(await persist(backup.items))) {
+        throw new Error('Restore conflicted or storage failed. Download the unsaved JSON before reloading.');
+      }
+      setBackupFeedback(`Restored ${backup.items.length} standup items.`);
+      announce(`Restored ${backup.items.length} standup items`);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Could not restore backup';
+      setBackupFeedback(message);
+      announce(message);
+    } finally {
+      if (backupInput.current) backupInput.current.value = '';
+    }
+  }, [persist, announce]);
 
   // Classify items into columns
   const columns = useMemo(() => {
@@ -280,6 +371,47 @@ export function App() {
     setTimeout(() => setCopiedSummary(false), 2000);
   }, [columns, announce]);
 
+  const downloadRecovery = useCallback(() => {
+    try {
+      const data = JSON.stringify({
+        app: 'yapture-standups', schemaVersion: 1,
+        exportedAt: new Date().toISOString(), items,
+      }, null, 2);
+      const url = URL.createObjectURL(new Blob([data], { type: 'application/json' }));
+      const link = document.createElement('a');
+      link.href = url;
+      link.download = `standups-unsaved-${new Date().toISOString().slice(0, 10)}.json`;
+      document.body.append(link);
+      try { link.click(); }
+      finally { link.remove(); setTimeout(() => URL.revokeObjectURL(url), 60_000); }
+      setRecoveryFeedback('Unsaved Standups JSON download started. Keep it before reloading.');
+      announce('Unsaved Standups download started');
+    } catch {
+      setRecoveryFeedback('Could not download unsaved data. Keep this tab open.');
+      announce('Could not download unsaved data');
+    }
+  }, [items, announce]);
+
+  const downloadLegacyRecovery = () => {
+    try {
+      const data = JSON.stringify({
+        app: 'yapture-standups', schemaVersion: 1,
+        exportedAt: new Date().toISOString(),
+        legacyItemsRaw: localStorage.getItem(STORAGE_KEY),
+      }, null, 2);
+      const url = URL.createObjectURL(new Blob([data], { type: 'application/json' }));
+      const link = document.createElement('a');
+      link.href = url;
+      link.download = `standups-legacy-recovery-${new Date().toISOString().slice(0, 10)}.json`;
+      document.body.append(link);
+      try { link.click(); }
+      finally { link.remove(); setTimeout(() => URL.revokeObjectURL(url), 60_000); }
+      setRecoveryFeedback('Original browser data download started. Keep it before changing this browser.');
+    } catch {
+      setRecoveryFeedback('Browser storage could not be read. Keep this tab and browser profile intact.');
+    }
+  };
+
   // Parse preview for badge display
   const preview = useMemo(() => (input.trim() ? parseScript(input) : null), [input]);
 
@@ -290,7 +422,8 @@ export function App() {
       <div style={styles.cardRow}>
         <button
           type="button"
-          onClick={() => cycleStatus(item.id)}
+          disabled={conflict || saving}
+          onClick={() => { void cycleStatus(item.id); }}
           aria-pressed={item.status === 'done'}
           aria-label={`Done: ${item.title}`}
           data-status-id={item.id}
@@ -312,7 +445,8 @@ export function App() {
         </span>
         <button
           type="button"
-          onClick={() => removeItem(item.id, siblings, headingId)}
+          disabled={conflict || saving}
+          onClick={() => { void removeItem(item.id, siblings, headingId); }}
           style={styles.removeBtn}
           aria-label={`Remove ${item.title}`}
           data-remove-id={item.id}
@@ -348,6 +482,13 @@ export function App() {
     );
   };
 
+  if (loadError) return <main role="alert">
+    <p>Standups storage could not be opened. Your older browser data was left untouched. Close older tabs and reload after saving a recovery copy.</p>
+    <button type="button" onClick={downloadLegacyRecovery}>Download original browser data</button>
+    {recoveryFeedback && <p role="status">{recoveryFeedback}</p>}
+  </main>;
+  if (!ready) return <main role="status">Loading Standups…</main>;
+
   return (
     <div style={styles.root}>
       {/* Responsive styles injected via <style> tag */}
@@ -366,7 +507,12 @@ export function App() {
       </header>
 
       <main style={styles.main}>
-        {storageWarning && <p role="alert">Changes could not be saved. They may disappear when you reload this page.</p>}
+        {storageWarning && <p role="alert">{conflict
+          ? 'Another tab changed this board or storage failed. This tab holds unsaved data. Download its JSON before reloading.'
+          : 'Older browser storage changed or cannot be read. This tab is read-only. Download the current backup and, if available, the original browser data before resolving the copies.'}</p>}
+        {storageWarning && <button type="button" onClick={downloadLegacyRecovery} style={styles.actionBtn}>Download original browser data</button>}
+        {conflict && <button type="button" onClick={downloadRecovery} style={styles.actionBtn}>Download unsaved JSON</button>}
+        {storageWarning && recoveryFeedback && <p role="status">{recoveryFeedback}</p>}
         {/* Composer */}
         <form onSubmit={handleSubmit} style={styles.form}>
           <label htmlFor="standup-input" className="sr-only">Add a task</label>
@@ -378,7 +524,7 @@ export function App() {
             placeholder="Add a task — try: Fix auth bug #+alex #@backend #!high #blocker due:today"
             style={styles.input}
           />
-          <button type="submit" disabled={!input.trim()} style={styles.addBtn}>
+          <button type="submit" disabled={conflict || saving || !input.trim()} style={styles.addBtn}>
             Add
           </button>
         </form>
@@ -397,7 +543,7 @@ export function App() {
 
         {/* Actions bar */}
         <div style={styles.actions}>
-          <button type="button" onClick={loadExamples} style={styles.actionBtn}>
+          <button type="button" disabled={conflict || saving} onClick={() => { void loadExamples(); }} style={styles.actionBtn}>
             + Team standup
           </button>
           <button type="button" onClick={() => setTeamView(!teamView)} style={{
@@ -412,6 +558,14 @@ export function App() {
           <span style={styles.countLabel}>{items.length} item{items.length !== 1 ? 's' : ''}</span>
         </div>
         {copyError && <p role="alert">Could not copy. Check clipboard permissions and try again.</p>}
+
+        <div style={styles.actions}>
+          <button type="button" onClick={downloadBackup} style={styles.actionBtn}>Download backup</button>
+          <input ref={backupInput} type="file" accept="application/json,.json" className="sr-only"
+            aria-label="Choose Standups backup" onChange={(e) => { void restoreBackup(e.target.files?.[0]); }} />
+          <button type="button" disabled={conflict || saving} onClick={() => backupInput.current?.click()} style={styles.actionBtn}>Restore backup</button>
+        </div>
+        {backupFeedback && <p role="alert">{backupFeedback}</p>}
 
         {/* Board */}
         {teamView && teamGroups ? (

@@ -98,6 +98,19 @@ function classifyItem(item: StandupItem): Column {
   return 'today';
 }
 
+export function groupStandups(items: StandupItem[]) {
+  const map = new Map<string | null, { yesterday: StandupItem[]; today: StandupItem[]; blockers: StandupItem[] }>();
+  for (const item of items) {
+    if (!map.has(item.assignee)) map.set(item.assignee, { yesterday: [], today: [], blockers: [] });
+    map.get(item.assignee)![classifyItem(item)].push(item);
+  }
+  return Array.from(map.entries()).sort(([a], [b]) => (a ?? 'Unassigned').localeCompare(b ?? 'Unassigned'))
+    .map(([assignee, columns]) => ({
+      key: assignee === null ? 'unassigned' : `assignee:${assignee}`,
+      name: assignee ?? 'Unassigned', columns,
+    }));
+}
+
 /* ── Example data ──────────────────────────────────────────────────── */
 
 const EXAMPLE_ITEMS: { text: string; status: StandupItem['status'] }[] = [
@@ -340,15 +353,7 @@ export function App() {
   // Team view: group by assignee
   const teamGroups = useMemo(() => {
     if (!teamView) return null;
-    const map = new Map<string, { yesterday: StandupItem[]; today: StandupItem[]; blockers: StandupItem[] }>();
-    for (const item of items) {
-      const name = item.assignee ?? 'Unassigned';
-      if (!map.has(name)) map.set(name, { yesterday: [], today: [], blockers: [] });
-      const group = map.get(name)!;
-      const col = classifyItem(item);
-      group[col].push(item);
-    }
-    return Array.from(map.entries()).sort(([a], [b]) => a.localeCompare(b));
+    return groupStandups(items);
   }, [items, teamView]);
 
   // Generate Slack summary
@@ -570,13 +575,13 @@ export function App() {
         {/* Board */}
         {teamView && teamGroups ? (
           <div className="standups-team-view">
-            {teamGroups.map(([name, group]) => (
-              <div key={name} style={styles.teamRow}>
+            {teamGroups.map(({ key, name, columns: group }) => (
+              <div key={key} style={styles.teamRow}>
                 <h2 style={styles.teamName}>{name}</h2>
                 <div className="standups-columns" style={styles.columnsGrid}>
-                  {renderColumn('Yesterday', group.yesterday, 'var(--yap-success)', `team-${name}`, 'h3')}
-                  {renderColumn('Today', group.today, ACCENT, `team-${name}`, 'h3')}
-                  {renderColumn('Blockers', group.blockers, 'var(--yap-danger)', `team-${name}`, 'h3')}
+                  {renderColumn('Yesterday', group.yesterday, 'var(--yap-success)', `team-${key}`, 'h3')}
+                  {renderColumn('Today', group.today, ACCENT, `team-${key}`, 'h3')}
+                  {renderColumn('Blockers', group.blockers, 'var(--yap-danger)', `team-${key}`, 'h3')}
                 </div>
               </div>
             ))}

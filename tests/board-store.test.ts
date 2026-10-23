@@ -211,3 +211,85 @@ test('a legacy write after opening blocks a database commit before the storage e
   expect(afterDenial.board.revision).toBe(0);
   opened.store.close(); afterDenial.store.close();
 });
+
+/** Connection lifecycle port over the serialized storage fixture, not browser acceptance. */
+function versionChangeConnection() {
+  const backing = fakeIndexedDb();
+  let database: IDBDatabase;
+  let closed = false;
+  let closeCalls = 0;
+  let transactions = 0;
+  const factory = {
+    open() {
+      const request = backing.open('lifecycle-fixture', 1);
+      database = request.result;
+      const transaction = database.transaction.bind(database);
+      database.close = () => { closed = true; closeCalls++; };
+      database.transaction = ((...args: Parameters<IDBDatabase['transaction']>) => {
+        if (closed) throw new DOMException('The connection is closing', 'InvalidStateError');
+        transactions++;
+        return transaction(...args);
+      }) as IDBDatabase['transaction'];
+      return request;
+    },
+  } as unknown as IDBFactory;
+  return {
+    factory,
+    state: () => ({ closed, closeCalls, transactions }),
+    versionChange(newVersion: number | null) {
+      database.onversionchange?.call(database, { oldVersion: 1, newVersion } as IDBVersionChangeEvent);
+    },
+  };
+}
+
+describe('Standups version change:', () => {
+  test('ordinary migration and commits remain usable until explicitly closed', async () => {
+    const connection = versionChangeConnection();
+    const opened = await BoardStore.open(connection.factory, () => storage({ [LEGACY]: JSON.stringify([item]) }));
+    expect(opened.board).toEqual({ revision: 0, items: [item] });
+    expect(connection.state().closed).toBe(false);
+    expect(await opened.store.commit(0, [item])).toEqual({ state: 'saved', revision: 1 });
+    opened.store.close();
+    expect(connection.state().closeCalls).toBe(1);
+  });
+
+  test('a blocked open closes a later successful connection without reading storage', async () => {
+    let closeCalls = 0;
+    const request = {
+      result: { close() { closeCalls++; }, transaction() { throw new Error('unexpected transaction'); } },
+      onblocked: null as null | (() => void), onsuccess: null as null | (() => void),
+    };
+    const factory = { open() {
+      queueMicrotask(() => { request.onblocked?.(); request.onsuccess?.(); });
+      return request;
+    } } as unknown as IDBFactory;
+    await expect(BoardStore.open(factory, () => { throw new Error('unexpected legacy read'); }))
+      .rejects.toThrow('Close older Standups tabs and reload');
+    expect(closeCalls).toBe(1);
+  });
+
+  test('an upgrade request closes the connection and rejects later writes', async () => {
+    const connection = versionChangeConnection();
+    const opened = await BoardStore.open(connection.factory, () => storage({ [LEGACY]: JSON.stringify([item]) }));
+    const before = structuredClone(opened.board);
+    const transactions = connection.state().transactions;
+    connection.versionChange(2);
+    expect(connection.state()).toEqual({ closed: true, closeCalls: 1, transactions });
+    await expect(opened.store.commit(0, [])).rejects.toThrow('The connection is closing');
+    expect(connection.state().transactions).toBe(transactions);
+    expect(opened.board).toEqual(before);
+  });
+
+  test('a deletion request closes only the notified connection', async () => {
+    const notified = versionChangeConnection();
+    const unrelated = versionChangeConnection();
+    const left = await BoardStore.open(notified.factory, () => storage({}));
+    const right = await BoardStore.open(unrelated.factory, () => storage({}));
+    notified.versionChange(null);
+    expect(notified.state().closed).toBe(true);
+    expect(unrelated.state().closed).toBe(false);
+    await expect(left.store.commit(0, [item])).rejects.toThrow('The connection is closing');
+    expect(await right.store.commit(0, [item])).toEqual({ state: 'saved', revision: 1 });
+    right.store.close();
+  });
+});

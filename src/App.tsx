@@ -601,13 +601,7 @@ export function App() {
           Script and list primitives
         </span>
         <span>&middot;</span>
-        <a href="https://yapture.com/docs/script" style={styles.footerLink}>
-          Script docs
-        </a>
-        <span>&middot;</span>
-        <a href="https://yapture.com/.well-known/yapture-api.md" style={styles.footerLink}>
-          API reference
-        </a>
+        <a href="https://docs.yapture.com/" style={styles.footerLink}>Developer docs</a>
       </footer>
     </div>
   );

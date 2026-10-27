@@ -98,6 +98,19 @@ function classifyItem(item: StandupItem): Column {
   return 'today';
 }
 
+export function groupStandups(items: StandupItem[]) {
+  const map = new Map<string | null, { yesterday: StandupItem[]; today: StandupItem[]; blockers: StandupItem[] }>();
+  for (const item of items) {
+    if (!map.has(item.assignee)) map.set(item.assignee, { yesterday: [], today: [], blockers: [] });
+    map.get(item.assignee)![classifyItem(item)].push(item);
+  }
+  return Array.from(map.entries()).sort(([a], [b]) => (a ?? 'Unassigned').localeCompare(b ?? 'Unassigned'))
+    .map(([assignee, columns]) => ({
+      key: assignee === null ? 'unassigned' : `assignee:${assignee}`,
+      name: assignee ?? 'Unassigned', columns,
+    }));
+}
+
 /* ── Example data ──────────────────────────────────────────────────── */
 
 const EXAMPLE_ITEMS: { text: string; status: StandupItem['status'] }[] = [
@@ -136,7 +149,11 @@ export function App() {
   const legacyWriteRef = useRef(false);
   const savingRef = useRef(false);
   const flip = useRef(false);
-  const pendingFocus = useRef<{ selector: string | null; fallbacks: string[] } | null>(null);
+  const pendingFocus = useRef<{
+    id: string | null;
+    attribute: 'data-status-id' | 'data-remove-id';
+    fallbacks: string[];
+  } | null>(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -163,7 +180,7 @@ export function App() {
 
   useEffect(() => {
     const onLegacyWrite = (event: StorageEvent) => {
-      if (event.key === STORAGE_KEY) { legacyWriteRef.current = true; setStorageWarning(true); }
+      if (event.key === null || event.key === STORAGE_KEY) { legacyWriteRef.current = true; setStorageWarning(true); }
     };
     window.addEventListener('storage', onLegacyWrite);
     return () => window.removeEventListener('storage', onLegacyWrite);
@@ -208,9 +225,11 @@ export function App() {
     const p = pendingFocus.current;
     if (!p) return;
     pendingFocus.current = null;
-    let selected: HTMLElement | null = null;
-    try { if (p.selector) selected = document.querySelector<HTMLElement>(p.selector); }
-    catch { /* A legacy record ID can contain CSS selector metacharacters. */ }
+    // Restored IDs are opaque strings; CSS escaping changes NUL to U+FFFD.
+    const selected = p.id !== null
+      ? Array.from(document.querySelectorAll<HTMLElement>(`[${p.attribute}]`))
+        .find((el) => el.getAttribute(p.attribute) === p.id)
+      : undefined;
     const el = selected || p.fallbacks.map((id) => document.getElementById(id)).find(Boolean);
     el?.focus();
   }, [items]);
@@ -226,7 +245,8 @@ export function App() {
         createdAt: new Date().toISOString(),
       };
       if (!(await persist([item, ...items]))) return;
-      setInput('');
+      // A completed save must not erase a draft typed while it was pending.
+      setInput(current => current === text ? '' : current);
       announce(`Added ${item.title}`);
     },
     [items, persist, announce],
@@ -238,7 +258,7 @@ export function App() {
       if (!cur) return;
       const nextStatus: StandupItem['status'] = cur.status === 'pending' ? 'done' : 'pending';
       /* The card may move to another column and remount, so re-find its toggle afterwards. */
-      pendingFocus.current = { selector: `[data-status-id="${CSS.escape(id)}"]`, fallbacks: ['standup-input'] };
+      pendingFocus.current = { id, attribute: 'data-status-id', fallbacks: ['standup-input'] };
       if (!(await persist(items.map((it) => (it.id !== id ? it : { ...it, status: nextStatus }))))) return;
       announce(nextStatus === 'done' ? `Marked ${cur.title} done` : `Marked ${cur.title} pending`);
     },
@@ -250,7 +270,7 @@ export function App() {
       const gone = items.find((it) => it.id === id);
       const i = siblings.findIndex((it) => it.id === id);
       const next = siblings[i + 1] ?? siblings[i - 1];
-      pendingFocus.current = { selector: next ? `[data-remove-id="${CSS.escape(next.id)}"]` : null, fallbacks: [headingId, 'standup-input'] };
+      pendingFocus.current = { id: next ? next.id : null, attribute: 'data-remove-id', fallbacks: [headingId, 'standup-input'] };
       if (!(await persist(items.filter((it) => it.id !== id)))) return;
       if (gone) announce(`Removed ${gone.title}`);
     },
@@ -340,15 +360,7 @@ export function App() {
   // Team view: group by assignee
   const teamGroups = useMemo(() => {
     if (!teamView) return null;
-    const map = new Map<string, { yesterday: StandupItem[]; today: StandupItem[]; blockers: StandupItem[] }>();
-    for (const item of items) {
-      const name = item.assignee ?? 'Unassigned';
-      if (!map.has(name)) map.set(name, { yesterday: [], today: [], blockers: [] });
-      const group = map.get(name)!;
-      const col = classifyItem(item);
-      group[col].push(item);
-    }
-    return Array.from(map.entries()).sort(([a], [b]) => a.localeCompare(b));
+    return groupStandups(items);
   }, [items, teamView]);
 
   // Generate Slack summary
@@ -561,7 +573,7 @@ export function App() {
 
         <div style={styles.actions}>
           <button type="button" onClick={downloadBackup} style={styles.actionBtn}>Download backup</button>
-          <input ref={backupInput} type="file" accept="application/json,.json" className="sr-only"
+          <input ref={backupInput} type="file" accept="application/json,.json" hidden
             aria-label="Choose Standups backup" onChange={(e) => { void restoreBackup(e.target.files?.[0]); }} />
           <button type="button" disabled={conflict || saving} onClick={() => backupInput.current?.click()} style={styles.actionBtn}>Restore backup</button>
         </div>
@@ -570,13 +582,13 @@ export function App() {
         {/* Board */}
         {teamView && teamGroups ? (
           <div className="standups-team-view">
-            {teamGroups.map(([name, group]) => (
-              <div key={name} style={styles.teamRow}>
+            {teamGroups.map(({ key, name, columns: group }) => (
+              <div key={key} style={styles.teamRow}>
                 <h2 style={styles.teamName}>{name}</h2>
                 <div className="standups-columns" style={styles.columnsGrid}>
-                  {renderColumn('Yesterday', group.yesterday, 'var(--yap-success)', `team-${name}`, 'h3')}
-                  {renderColumn('Today', group.today, ACCENT, `team-${name}`, 'h3')}
-                  {renderColumn('Blockers', group.blockers, 'var(--yap-danger)', `team-${name}`, 'h3')}
+                  {renderColumn('Yesterday', group.yesterday, 'var(--yap-success)', `team-${key}`, 'h3')}
+                  {renderColumn('Today', group.today, ACCENT, `team-${key}`, 'h3')}
+                  {renderColumn('Blockers', group.blockers, 'var(--yap-danger)', `team-${key}`, 'h3')}
                 </div>
               </div>
             ))}

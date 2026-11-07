@@ -37,10 +37,10 @@ jobs:
           always-auth=true
           EOF
         env:
-          NODE_AUTH_TOKEN: ${{ secrets.GH_PACKAGES_TOKEN || github.token }}
+          NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       - run: sfw bun install --frozen-lockfile --ignore-scripts
         env:
-          NODE_AUTH_TOKEN: ${{ secrets.GH_PACKAGES_TOKEN || github.token }}
+          NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       - run: bun run typecheck
       - run: bun run grep-gate
       - run: bun run build
